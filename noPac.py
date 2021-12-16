@@ -66,6 +66,7 @@ def get_hash_from_secrets(username):
         if admin_acc:
             username = admin_acc.group(1)
             hash = admin_acc.group(2)
+            print(f'Admin Cred: {username}:{hash}')
             return username, hash
         
 
