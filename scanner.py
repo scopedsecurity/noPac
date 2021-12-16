@@ -21,18 +21,6 @@ from impacket.krb5.kerberosv5 import getKerberosTGT
 from impacket.krb5 import constants
 from impacket.krb5.types import Principal
 
-def banner():
-    return """
-███    ██  ██████  ██████   █████   ██████ 
-████   ██ ██    ██ ██   ██ ██   ██ ██      
-██ ██  ██ ██    ██ ██████  ███████ ██      
-██  ██ ██ ██    ██ ██      ██   ██ ██      
-██   ████  ██████  ██      ██   ██  ██████ 
-                                           
-                                        
-    """
-
-
 
 def getTGT(username, options, kdc,requestPAC=True):
     userName = Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
@@ -52,10 +40,27 @@ def getTGT(username, options, kdc,requestPAC=True):
         logging.error(f"Error getting TGT, {e}")
         return None
 
-def vulscan(username, password, domain, options):
-    domain, username, password, lmhash, nthash = parse_identity(options)
-    ldap_server, ldap_session = init_ldap_session(options, domain, username, password, lmhash, nthash)
 
+def check_patch(username, options, kdc):
+    # Patched DCs respond with PACs regardless, compare requests to check if DC is patched
+    pac_tgt = getTGT(username, options, kdc, requestPAC=True)
+    no_pac_tgt = getTGT(username, options, kdc, requestPAC=False)
+    if pac_tgt and no_pac_tgt:
+        print(f'[+] TGT with PAC: {len(pac_tgt)}')
+        print(f'[+] TGT without PAC: {len(no_pac_tgt)}')
+        if len(pac_tgt) == len(no_pac_tgt):
+            print(f'[-] TGTs are same size, target {options.dc_ip} is patched')
+            exit()
+        else:
+            print(f'[+] TGTs differ in size, target is not patched')
+            return True
+    else:
+        print(f'[-] Failed requesting both TGTs to check patch status')
+        exit()
+
+
+def check_machine_account_quota(username, password, domain, lmhash, nthash, options):
+    ldap_server, ldap_session = init_ldap_session(options, domain, username, password, lmhash, nthash)
     cnf = ldapdomaindump.domainDumpConfig()
     cnf.basepath = None
     domain_dumper = ldapdomaindump.domainDumper(ldap_server, ldap_session, cnf)
@@ -68,33 +73,20 @@ def vulscan(username, password, domain, options):
         exit()
     else:
         logging.info(f'Current ms-DS-MachineAccountQuota = {MachineAccountQuota}')
+        return MachineAccountQuota
 
 
-    dcinfo = get_dc_host(ldap_session, domain_dumper,options)
-    if len(dcinfo)== 0:
-        logging.error("Cannot get domain info")
-        exit()
-    
-    # Getting a ticket with PAC
-    tgt = getTGT(username,options,options.dc_ip)
-    if tgt:
-        logging.info(f'Got TGT with PAC from {options.dc_ip}. Ticket size {len(tgt)}')
-    else:
-        logging.info(f'Get TGT wrong!')
-        exit()
-   
-    for dc in dcinfo:
-        if len(dcinfo[dc]['HostIP']) > 0:
-            kdc = dcinfo[dc]['HostIP']
-            tgt = getTGT(username,options,kdc, False)
-            if tgt:
-                logging.info(f"Got TGT from {dcinfo[dc]['dNSHostName']}. Ticket size {len(tgt)}")
-        else:
-            logging.error(f"Can't get DC ip from dns..")
+def check(username, password, domain, options):
+    domain, username, password, lmhash, nthash = parse_identity(options)
+
+    # Check if DC is patched
+    check_patch(username, options, options.dc_ip)
+
+    # Check machine account quota
+    check_machine_account_quota(username, password, domain, lmhash, nthash, options)
+
 
 if __name__ == '__main__':
-    print(banner())
-
     parser = argparse.ArgumentParser(add_help = True, description = "SAM THE ADMIN CVE-2021-42278 + CVE-2021-42287 chain")
 
     parser.add_argument('account', action='store', metavar='[domain/]username[:password]', help='Account used to authenticate to DC.')
@@ -152,11 +144,7 @@ if __name__ == '__main__':
             logging.info("Not supoort ccache")
             exit()
 
-        vulscan(username, password, domain, options)
-    except ldap3.core.exceptions.LDAPBindError as e:
-        logging.error(f"Pls check your account. Error: {e}")
-    except ldap3.core.exceptions.LDAPSocketOpenError as e:
-         logging.error(f"If ssl error, add `-use-ldap` parameter to connect with ldap. Error: {e}")
+        check(username, password, domain, options)
     except Exception as e:
         if logging.getLogger().level == logging.DEBUG:
             import traceback

