@@ -37,6 +37,7 @@ class AddComputerSAMR:
         self.__noAdd = False
         self.__delete = False
         self.__targetIp = cmdLineOptions.dc_ip
+        self.__success = False
 
         if self.__targetIp is not None:
             self.__kdcHost = self.__targetIp
@@ -211,6 +212,7 @@ class AddComputerSAMR:
                     req['tag'] = samr.USER_INFORMATION_CLASS.UserControlInformation
                     req['Control']['UserAccountControl'] = samr.USER_WORKSTATION_TRUST_ACCOUNT
                     samr.hSamrSetInformationUser2(dce, userHandle, req)
+                    self.__success = True
                     logging.info("Successfully added machine account %s with password %s." % (self.__computerName, self.__computerPassword))
 
         except Exception as e:

