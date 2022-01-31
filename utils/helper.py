@@ -306,7 +306,7 @@ def get_domain_admins(ldap_session, domain_dumper):
     a = ldap_session.entries[0]
     js = a.entry_to_json()
     dn = json.loads(js)['dn']
-    search_filter = f"(&(objectClass=person)(sAMAccountName=*)(memberOf:1.2.840.113556.1.4.1941:={dn}))"
+    search_filter = f"(&(objectClass=person)(sAMAccountName=*)(memberOf:1.2.840.113556.1.4.1941:={dn})(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
 
     ldap_session.search(domain_dumper.root, search_filter, attributes=["sAMAccountName"])
     for u in ldap_session.entries:

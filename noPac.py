@@ -147,7 +147,7 @@ def get_dc_hostname(ldap_session, domain_dumper, options):
             print(f'[+] Successfully queried LDAP for matching DC record: {host} {info["dNSHostName"]}')
             return host, info['dNSHostName']
     else:
-        print(f'[-] Failed finding DC with matching IP {options.ip}. {dcinfo}')
+        print(f'[-] Failed finding DC with matching IP {options.dc_ip}. {dcinfo}')
         exit()
 
 def create_temp_account(username, password, domain, options, delete=False):
