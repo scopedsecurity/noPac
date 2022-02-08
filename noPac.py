@@ -116,7 +116,7 @@ def check_machine_account_quota(username, password, domain, lmhash, nthash, opti
     for i in domain_dumper.getDomainPolicy():
         MachineAccountQuota = int(str(i['ms-DS-MachineAccountQuota']))
 
-    if MachineAccountQuota < 0:
+    if MachineAccountQuota < 1:
         print(f'[-] Cannot exploit. ms-DS-MachineAccountQuota: {MachineAccountQuota}')
         exit()
     else:
