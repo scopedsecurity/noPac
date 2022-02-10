@@ -62,10 +62,10 @@ def get_hash_from_secrets(username):
         lines = f.readlines()
     
     for line in lines:
+        admin_acc = re.search(r"(?:\S+)\\" + username + ":(?:\d+):(?:[0-9a-f]{32}):([0-9a-f]{32}):::", line)
         admin_acc = re.search(r"(?:\S+)\\(\S+):(?:\d+):(?:[0-9a-f]{32}):([0-9a-f]{32}):::", line)
         if admin_acc:
-            username = admin_acc.group(1)
-            hash = admin_acc.group(2)
+            hash = admin_acc.group(1)
             print(f'Admin Cred: {username}:{hash}')
             return username, hash
         
